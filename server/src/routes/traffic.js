@@ -1,0 +1,111 @@
+import { Router } from 'express';
+import { readFileSync } from 'fs';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
+import supabaseAdmin from '../config/supabase.js';
+import { trafficLimiter } from '../middleware/rate-limiter.js';
+
+const router = Router();
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const scriptPath = join(__dirname, '..', 'public', 't.js');
+
+let cachedScript = null;
+let cachedEtag = null;
+
+function getScript() {
+  if (!cachedScript) {
+    cachedScript = readFileSync(scriptPath, 'utf-8');
+    cachedEtag = `"${Buffer.from(cachedScript).length.toString(36)}-${Date.now().toString(36)}"`;
+  }
+  return { body: cachedScript, etag: cachedEtag };
+}
+
+/**
+ * GET /t.js — serve the tracking script with aggressive caching
+ */
+router.get('/t.js', (req, res) => {
+  const { body, etag } = getScript();
+
+  if (req.headers['if-none-match'] === etag) {
+    return res.status(304).end();
+  }
+
+  res.set({
+    'Content-Type': 'application/javascript; charset=utf-8',
+    'Cache-Control': 'public, max-age=3600, stale-while-revalidate=86400',
+    'ETag': etag,
+    'Access-Control-Allow-Origin': '*',
+    'X-Content-Type-Options': 'nosniff',
+  });
+
+  return res.send(body);
+});
+
+/**
+ * CORS preflight for track endpoint (fetch fallback needs this)
+ */
+router.options('/track/:trackingCode', (req, res) => {
+  res.set({
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Max-Age': '86400',
+  });
+  return res.status(204).end();
+});
+
+/**
+ * POST /track/:trackingCode — receive beacon data from t.js
+ */
+router.post('/track/:trackingCode', trafficLimiter, async (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  try {
+    const { trackingCode } = req.params;
+
+    if (!trackingCode || trackingCode.length < 6 || trackingCode.length > 64) {
+      return res.status(400).json({ ok: false });
+    }
+
+    const { data: brand, error: brandErr } = await supabaseAdmin
+      .from('brands')
+      .select('id')
+      .eq('tracking_code', trackingCode)
+      .single();
+
+    if (brandErr || !brand) {
+      return res.status(404).json({ ok: false });
+    }
+
+    const body = req.body;
+    if (!body || !body.u) {
+      return res.status(400).json({ ok: false });
+    }
+
+    const ip = req.headers['cf-connecting-ip']
+      || req.headers['x-forwarded-for']?.split(',')[0]?.trim()
+      || req.headers['x-real-ip']
+      || req.ip;
+
+    const country = req.headers['cf-ipcountry'] || null;
+
+    await supabaseAdmin.from('ai_traffic_logs').insert({
+      brand_id: brand.id,
+      url: (body.u || '').slice(0, 2048),
+      referrer: (body.r || '').slice(0, 2048) || null,
+      source_platform: (body.s || '').slice(0, 255) || null,
+      user_agent: (body.a || '').slice(0, 512) || null,
+      ip_address: ip || null,
+      country,
+      language: (body.l || '').slice(0, 16) || null,
+      screen: (body.d || '').slice(0, 16) || null,
+    });
+
+    return res.status(204).end();
+  } catch (error) {
+    console.error('[traffic] Track error:', error.message);
+    return res.status(500).json({ ok: false });
+  }
+});
+
+export default router;

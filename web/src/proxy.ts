@@ -1,0 +1,70 @@
+import createMiddleware from "next-intl/middleware";
+import { type NextRequest, NextResponse } from "next/server";
+import { routing } from "@/i18n/routing";
+import { updateSession } from "@/lib/supabase/middleware";
+
+const intlMiddleware = createMiddleware(routing);
+
+const protectedPathnames = ["/dashboard"];
+const authPathnames = ["/sign-in", "/sign-up"];
+
+function isProtected(pathname: string): boolean {
+  return protectedPathnames.some(
+    (p) => pathname === p || pathname.startsWith(`${p}/`)
+  );
+}
+
+function isAuthRoute(pathname: string): boolean {
+  return authPathnames.some(
+    (p) => pathname === p || pathname.startsWith(`${p}/`)
+  );
+}
+
+export async function proxy(request: NextRequest) {
+  const { pathname } = request.nextUrl;
+
+  const pathnameWithoutLocale = pathname.replace(/^\/(en)/, "") || "/";
+
+  let supabaseResponse: NextResponse | undefined;
+  let user: { id: string } | null = null;
+
+  try {
+    const session = await updateSession(request);
+    supabaseResponse = session.supabaseResponse;
+    user = session.user;
+  } catch {
+    // Supabase session refresh failed — continue without auth context
+    // so next-intl locale routing still works
+  }
+
+  if (pathnameWithoutLocale === "/") {
+    const target = user ? "/dashboard" : "/sign-in";
+    return NextResponse.redirect(new URL(target, request.url));
+  }
+
+  if (isProtected(pathnameWithoutLocale) && !user) {
+    const signInUrl = new URL("/sign-in", request.url);
+    signInUrl.searchParams.set("redirectTo", pathname);
+    return NextResponse.redirect(signInUrl);
+  }
+
+  if (isAuthRoute(pathnameWithoutLocale) && user) {
+    return NextResponse.redirect(new URL("/dashboard", request.url));
+  }
+
+  const intlResponse = intlMiddleware(request);
+
+  if (supabaseResponse) {
+    supabaseResponse.cookies.getAll().forEach((cookie) => {
+      intlResponse.cookies.set(cookie.name, cookie.value, cookie);
+    });
+  }
+
+  return intlResponse;
+}
+
+export const config = {
+  matcher: [
+    "/((?!api|_next|_vercel|.*\\..*).*)",
+  ],
+};

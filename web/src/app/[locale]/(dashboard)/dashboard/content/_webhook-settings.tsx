@@ -1,0 +1,211 @@
+"use client";
+
+import { useState, useEffect } from "react";
+import { useTranslations } from "next-intl";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Loader2, CheckCircle2, XCircle } from "lucide-react";
+import {
+  getWebhookConfig,
+  saveWebhookConfig,
+  testWebhook,
+} from "@/lib/actions/content";
+import { toast } from "sonner";
+
+interface WebhookSettingsDialogProps {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  brandId: string;
+}
+
+export function WebhookSettingsDialog({
+  open,
+  onOpenChange,
+  brandId,
+}: WebhookSettingsDialogProps) {
+  const t = useTranslations("content.webhook");
+
+  const [url, setUrl] = useState("");
+  const [secret, setSecret] = useState("");
+  const [isActive, setIsActive] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{
+    success: boolean;
+    message: string;
+  } | null>(null);
+
+  useEffect(() => {
+    if (open && brandId) {
+      setLoading(true);
+      setTestResult(null);
+      getWebhookConfig(brandId)
+        .then((config) => {
+          if (config) {
+            setUrl(config.webhookUrl);
+            setSecret(config.webhookSecret || "");
+            setIsActive(config.isActive);
+          }
+        })
+        .catch(console.error)
+        .finally(() => setLoading(false));
+    }
+  }, [open, brandId]);
+
+  const handleSave = async () => {
+    if (!url.trim()) {
+      toast.error("Webhook URL is required");
+      return;
+    }
+    setSaving(true);
+    try {
+      await saveWebhookConfig(brandId, {
+        webhookUrl: url.trim(),
+        webhookSecret: secret.trim() || undefined,
+        isActive,
+      });
+      toast.success(t("saved"));
+      onOpenChange(false);
+    } catch (err) {
+      console.error("Save webhook failed:", err);
+      toast.error("Failed to save webhook config");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleTest = async () => {
+    if (!url.trim()) {
+      toast.error("Enter a webhook URL first");
+      return;
+    }
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const result = await testWebhook(url.trim(), secret.trim() || undefined);
+      setTestResult({
+        success: result.success,
+        message: result.success
+          ? t("testSuccess")
+          : result.error || `HTTP ${result.status}`,
+      });
+    } catch (err) {
+      setTestResult({
+        success: false,
+        message: err instanceof Error ? err.message : "Test failed",
+      });
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>{t("title")}</DialogTitle>
+          <DialogDescription>{t("description")}</DialogDescription>
+        </DialogHeader>
+
+        {loading ? (
+          <div className="flex justify-center py-8">
+            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="webhook-url">{t("url")}</Label>
+              <Input
+                id="webhook-url"
+                type="url"
+                placeholder={t("urlPlaceholder")}
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="webhook-secret">{t("secret")}</Label>
+              <Input
+                id="webhook-secret"
+                type="password"
+                placeholder={t("secretPlaceholder")}
+                value={secret}
+                onChange={(e) => setSecret(e.target.value)}
+              />
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                role="switch"
+                aria-checked={isActive}
+                onClick={() => setIsActive(!isActive)}
+                className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors ${
+                  isActive ? "bg-primary" : "bg-muted"
+                }`}
+              >
+                <span
+                  className={`pointer-events-none block h-3.5 w-3.5 rounded-full bg-background shadow-lg transition-transform ${
+                    isActive ? "translate-x-4" : "translate-x-0.5"
+                  }`}
+                />
+              </button>
+              <span className="text-sm">
+                {isActive ? t("active") : t("inactive")}
+              </span>
+            </div>
+
+            {testResult && (
+              <div
+                className={`flex items-center gap-2 rounded-md border p-3 text-sm ${
+                  testResult.success
+                    ? "border-green-500/30 bg-green-500/10 text-green-600 dark:text-green-400"
+                    : "border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-400"
+                }`}
+              >
+                {testResult.success ? (
+                  <CheckCircle2 className="h-4 w-4 shrink-0" />
+                ) : (
+                  <XCircle className="h-4 w-4 shrink-0" />
+                )}
+                {testResult.message}
+              </div>
+            )}
+
+            <div className="flex justify-between gap-2 pt-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleTest}
+                disabled={testing || !url.trim()}
+                className="gap-2"
+              >
+                {testing && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                {testing ? t("testing") : t("test")}
+              </Button>
+              <Button
+                size="sm"
+                onClick={handleSave}
+                disabled={saving || !url.trim()}
+                className="gap-2"
+              >
+                {saving && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                {saving ? t("saving") : t("save")}
+              </Button>
+            </div>
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}

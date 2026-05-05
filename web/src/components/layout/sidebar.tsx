@@ -1,0 +1,187 @@
+'use client';
+
+import Image from 'next/image';
+import { useTheme } from 'next-themes';
+import { useEffect, useState } from 'react';
+import { useTranslations } from 'next-intl';
+import { usePathname, Link } from '@/i18n/navigation';
+import { dashboardNav } from '@/config/dashboard';
+import { useSidebarStore } from '@/stores/use-sidebar-store';
+import { useFeatureGate } from '@/hooks/use-feature-gate';
+import { siteConfig } from '@/config/site';
+import { cn } from '@/lib/utils';
+import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { ScrollArea } from '@/components/ui/scroll-area';
+import { Separator } from '@/components/ui/separator';
+import { BrandSwitcher } from '@/components/layout/brand-switcher';
+import {
+  Crown,
+  Lock,
+  PanelLeftClose,
+  PanelLeftOpen,
+} from 'lucide-react';
+
+export function Sidebar() {
+  const pathname = usePathname();
+  const { isCollapsed, toggleCollapse } = useSidebarStore();
+  const t = useTranslations('nav');
+  const tBrands = useTranslations('brands');
+  const { canUse, requiredPlanFor, isCloud } = useFeatureGate();
+  const { resolvedTheme } = useTheme();
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+  const logoSrc =
+    mounted && resolvedTheme === 'dark' ? '/logo_dark.svg' : '/logo_light.svg';
+
+  const navKeyMap: Record<string, () => string> = {
+    Overview: () => t('overview'),
+    Brands: () => tBrands('title'),
+    'Answer Engine Insights': () => t('insights'),
+    'AI Traffic Analytics': () => t('traffic'),
+    Prompts: () => t('prompts'),
+    Topics: () => t('topics'),
+    'Content Optimization': () => t('content'),
+    Competitors: () => t('competitors'),
+    Citations: () => t('citations'),
+    Reports: () => t('reports'),
+    Settings: () => t('settings'),
+  };
+
+  return (
+    <aside
+      className={cn(
+        'relative flex h-full flex-col border-r bg-card transition-all duration-300',
+        isCollapsed ? 'w-16' : 'w-60',
+      )}
+    >
+      {/* Logo */}
+      <div className="flex h-16 items-center border-b px-3">
+        <Link
+          href="/dashboard"
+          className="flex items-center gap-2 overflow-hidden"
+        >
+          <Image
+            src={logoSrc}
+            alt={siteConfig.name}
+            width={24}
+            height={24}
+            className="h-6 w-6 shrink-0"
+            priority
+          />
+          {!isCollapsed && (
+            <span className="truncate font-semibold">{siteConfig.name}</span>
+          )}
+        </Link>
+      </div>
+
+      {/* Brand Switcher */}
+      <div
+        className={cn('border-b px-2 py-2', isCollapsed && 'px-1')}
+      >
+        <BrandSwitcher collapsed={isCollapsed} />
+      </div>
+
+      {/* Nav */}
+      <ScrollArea className="flex-1 px-2 py-3">
+        {dashboardNav.map((group, i) => (
+          <div key={i} className="mb-4">
+            {group.title && !isCollapsed && (
+              <p className="mb-1 px-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                {group.title}
+              </p>
+            )}
+            {group.title && isCollapsed && i > 0 && (
+              <Separator className="my-2" />
+            )}
+            <nav className="space-y-0.5">
+              {group.items.map((item) => {
+                const isActive =
+                  item.href === '/dashboard'
+                    ? pathname === '/dashboard'
+                    : pathname.startsWith(item.href);
+                const labelFn = navKeyMap[item.title];
+                const label = labelFn ? labelFn() : item.title;
+
+                const isLocked =
+                  isCloud &&
+                  item.requiredFeature != null &&
+                  !canUse(item.requiredFeature);
+
+                if (isLocked) {
+                  return (
+                    <span
+                      key={item.href}
+                      className={cn(
+                        'flex items-center gap-3 rounded-md px-2 py-2 text-sm font-medium text-muted-foreground/50 cursor-not-allowed',
+                        isCollapsed && 'justify-center',
+                      )}
+                      title={
+                        isCollapsed
+                          ? `${label} (${requiredPlanFor(item.requiredFeature!)})`
+                          : undefined
+                      }
+                    >
+                      <item.icon className="h-4 w-4 shrink-0" />
+                      {!isCollapsed && (
+                        <>
+                          <span className="flex-1 truncate">{label}</span>
+                          <Badge
+                            variant="outline"
+                            className="ml-auto h-5 gap-0.5 px-1.5 text-[10px] font-normal shrink-0"
+                          >
+                            <Crown className="h-2.5 w-2.5" />
+                            {requiredPlanFor(item.requiredFeature!)}
+                          </Badge>
+                        </>
+                      )}
+                      {isCollapsed && (
+                        <Lock className="absolute right-1 top-1 h-2.5 w-2.5 text-muted-foreground/40" />
+                      )}
+                    </span>
+                  );
+                }
+
+                return (
+                  <Link key={item.href} href={item.href}>
+                    <span
+                      className={cn(
+                        'flex items-center gap-3 rounded-md px-2 py-2 text-sm font-medium transition-colors',
+                        isActive
+                          ? 'bg-primary/10 text-primary'
+                          : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground',
+                        isCollapsed && 'justify-center',
+                      )}
+                      title={isCollapsed ? label : undefined}
+                    >
+                      <item.icon className="h-4 w-4 shrink-0" />
+                      {!isCollapsed && (
+                        <span className="truncate">{label}</span>
+                      )}
+                    </span>
+                  </Link>
+                );
+              })}
+            </nav>
+          </div>
+        ))}
+      </ScrollArea>
+
+      {/* Collapse toggle */}
+      <div className="border-t p-2">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="w-full"
+          onClick={toggleCollapse}
+        >
+          {isCollapsed ? (
+            <PanelLeftOpen className="h-4 w-4" />
+          ) : (
+            <PanelLeftClose className="h-4 w-4" />
+          )}
+        </Button>
+      </div>
+    </aside>
+  );
+}

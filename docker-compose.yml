@@ -1,0 +1,20 @@
+services:
+  web:
+    image: ghcr.io/aeohub/ansvisor/web:0.1.0
+    build: ./web
+    ports:
+      - "3000:3000"
+    env_file:
+      - ./web/.env
+    depends_on:
+      - server
+    restart: unless-stopped
+
+  server:
+    image: ghcr.io/aeohub/ansvisor/server:0.1.0
+    build: ./server
+    ports:
+      - "80:80"
+    env_file:
+      - ./server/.env
+    restart: unless-stopped

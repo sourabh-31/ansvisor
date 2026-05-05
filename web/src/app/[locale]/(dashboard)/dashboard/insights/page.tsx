@@ -1,0 +1,1908 @@
+'use client';
+
+import { useState, useRef, useEffect, useCallback } from 'react';
+import { useRouter } from '@/i18n/navigation';
+import { useSearchParams } from 'next/navigation';
+import { createPortal } from 'react-dom';
+import { CompetitorChart, CompetitorLeaderboard, ShareOfVoicePlatformChart, ShareOfVoiceTrendChart } from './_charts';
+import { MetricBreakdownSheet } from './_metric-breakdown-sheet';
+import { useBrandStore } from '@/stores/use-brand-store';
+import {
+  getPromptResults,
+  getInsightsSummary,
+  getCompetitorComparison,
+  getShareOfVoiceData,
+  triggerTrackingCheck,
+  getJobStatus,
+  cancelTrackingJob,
+  getBrandPrompts,
+  type PromptResultWithText,
+  type InsightsSummary,
+  type CompetitorComparisonData,
+  type ShareOfVoiceData,
+  type TrackingJobStatus,
+  type BreakdownMetric,
+} from '@/lib/actions/tracking';
+import { getTopics } from '@/lib/actions/topic';
+import type { Topic } from '@/types';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableRow,
+} from '@/components/ui/table';
+import { Skeleton } from '@/components/ui/skeleton';
+import {
+  BarChart3,
+  CalendarX2,
+  ChevronDown,
+  HelpCircle,
+  Play,
+  TrendingUp,
+  TrendingDown,
+  Quote,
+  Zap,
+  AlertCircle,
+  Loader2,
+  Eye,
+  RefreshCw,
+  FlaskConical,
+  PieChart,
+  Users,
+  StopCircle,
+  Tag,
+  ArrowUpRight,
+} from 'lucide-react';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { Input } from '@/components/ui/input';
+import { cn } from '@/lib/utils';
+import {
+  AIProviderAvatar,
+  getAIProviderDisplayName,
+  resolveAIProvider,
+} from '@/components/ai-provider-avatar';
+import { usePlanContext } from '@/components/providers/plan-provider';
+import { toast } from 'sonner';
+
+// ─── Filter Types ─────────────────────────────────────────────────────────────
+
+type DatePreset = '24h' | '7d' | '30d' | '90d' | 'all' | 'custom';
+
+interface InsightsFilters {
+  datePreset: DatePreset;
+  dateFrom: string;
+  dateTo: string;
+  region: string;
+  model: string;
+  topic: string;
+}
+
+const DEFAULT_FILTERS: InsightsFilters = {
+  datePreset: 'all',
+  dateFrom: '',
+  dateTo: '',
+  region: '',
+  model: '',
+  topic: '',
+};
+
+/** Max rows loaded for the grouped Prompt Results table (newest first).
+ *  Sized to show several recent runs per (prompt × platform) pair so the
+ *  "previous runs" history inside each platform group has meaningful depth. */
+const PROMPT_RESULTS_ROW_LIMIT = 1500;
+
+function getDateRange(
+  preset: DatePreset,
+  custom: { from: string; to: string },
+) {
+  if (preset === 'all') return { dateFrom: undefined, dateTo: undefined };
+  if (preset === 'custom') {
+    return {
+      dateFrom: custom.from || undefined,
+      dateTo: custom.to ? `${custom.to}T23:59:59.999Z` : undefined,
+    };
+  }
+  if (preset === '24h') {
+    const from = new Date();
+    from.setHours(from.getHours() - 24);
+    return { dateFrom: from.toISOString(), dateTo: undefined };
+  }
+  const days = preset === '7d' ? 7 : preset === '30d' ? 30 : 90;
+  const from = new Date();
+  from.setDate(from.getDate() - days);
+  return { dateFrom: from.toISOString(), dateTo: undefined };
+}
+
+// ─── Info Tooltip ─────────────────────────────────────────────────────────────
+
+function InfoTip({ content }: { content: string }) {
+  const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
+  const ref = useRef<HTMLSpanElement>(null);
+
+  function show() {
+    const r = ref.current?.getBoundingClientRect();
+    if (r) setPos({ x: r.left + r.width / 2, y: r.bottom + 6 });
+  }
+
+  return (
+    <>
+      <span
+        ref={ref}
+        onMouseEnter={show}
+        onMouseLeave={() => setPos(null)}
+        className="inline-flex items-center cursor-help"
+      >
+        <HelpCircle className="h-3 w-3 text-muted-foreground/60 hover:text-muted-foreground transition-colors" />
+      </span>
+      {pos &&
+        createPortal(
+          <div
+            style={{ left: pos.x, top: pos.y, transform: 'translateX(-50%)' }}
+            className="pointer-events-none fixed z-[9999] w-56 rounded-md border bg-popover px-3 py-2 text-xs text-popover-foreground shadow-md"
+          >
+            {content}
+          </div>,
+          document.body,
+        )}
+    </>
+  );
+}
+
+// ─── Sub-components ───────────────────────────────────────────────────────────
+
+function SentimentBadge({
+  sentiment,
+}: {
+  sentiment: 'positive' | 'neutral' | 'negative';
+}) {
+  return (
+    <Badge
+      variant="outline"
+      className={cn(
+        'text-xs capitalize',
+        sentiment === 'positive' &&
+          'border-green-500/30 bg-green-500/10 text-green-600 dark:text-green-400',
+        sentiment === 'neutral' &&
+          'border-yellow-500/30 bg-yellow-500/10 text-yellow-600 dark:text-yellow-400',
+        sentiment === 'negative' &&
+          'border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-400',
+      )}
+    >
+      {sentiment}
+    </Badge>
+  );
+}
+
+function VisibilityBar({ score, max = 100 }: { score: number; max?: number }) {
+  const pct = Math.round((score / max) * 100);
+  return (
+    <div className="flex items-center gap-2">
+      <div className="h-1.5 w-24 rounded-full bg-muted overflow-hidden">
+        <div
+          className={cn(
+            'h-full rounded-full transition-all',
+            score >= 60
+              ? 'bg-green-500'
+              : score >= 40
+                ? 'bg-yellow-500'
+                : 'bg-red-500',
+          )}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      <span className="text-sm font-medium tabular-nums">{Math.round(score)}</span>
+    </div>
+  );
+}
+
+const PLATFORM_LABELS: Record<string, string> = {
+  chatgpt: 'ChatGPT',
+  gemini: 'Gemini',
+  perplexity: 'Perplexity',
+  claude: 'Claude',
+  grok: 'Grok',
+  copilot: 'Copilot',
+  'meta-ai': 'Meta AI',
+  'google-ai-overviews': 'Google AI',
+  'google-ai-mode': 'Google AI Mode',
+  'chatgpt-web': 'ChatGPT',
+  'google-aio': 'Google AI Overview',
+  'google-aimode': 'Google AI Mode',
+  'copilot-web': 'Microsoft Copilot',
+  'grok-web': 'Grok',
+  'perplexity-web': 'Perplexity',
+  'gemini-web': 'Google Gemini',
+};
+
+const MODEL_DISPLAY_NAME: Record<string, string> = {
+  'gpt-4o': 'GPT-4o',
+  'gpt-4o-mini': 'GPT-4o Mini',
+  'gpt-4.1': 'GPT-4.1',
+  'gpt-4.1-mini': 'GPT-4.1 Mini',
+  'gpt-4.1-nano': 'GPT-4.1 Nano',
+  'gpt-5-chat-latest': 'ChatGPT',
+  'claude-sonnet-4-6': 'Claude',
+  'claude-opus-4-6': 'Claude',
+  'claude-haiku-4-5': 'Claude',
+  'gemini-2.5-pro': 'Gemini 2.5 Pro',
+  'gemini-2.5-flash': 'Gemini 2.5 Flash',
+  'grok-3': 'Grok',
+  'grok-4-auto': 'Grok',
+  'chatgpt-web': 'ChatGPT',
+  'perplexity-web': 'Perplexity',
+  'google-aio': 'Google AI Overview',
+  'google-aimode': 'Google AI Mode',
+  'copilot-web': 'Microsoft Copilot',
+  'grok-web': 'Grok',
+  'gemini-web': 'Gemini',
+};
+
+function getModelDisplayName(model: string, platform?: string): string {
+  if (platform && MODEL_DISPLAY_NAME[platform]) {
+    const modelName = MODEL_DISPLAY_NAME[model];
+    return modelName && modelName !== MODEL_DISPLAY_NAME[platform]
+      ? `${MODEL_DISPLAY_NAME[platform]} · ${modelName}`
+      : MODEL_DISPLAY_NAME[platform];
+  }
+  return MODEL_DISPLAY_NAME[model] ?? model;
+}
+
+function ModelBadge({ model, platform }: { model: string; platform?: string }) {
+  const provider = resolveAIProvider(model, platform);
+
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <AIProviderAvatar provider={provider} />
+      <span className="text-xs">{getModelDisplayName(model, platform)}</span>
+    </span>
+  );
+}
+
+interface PlatformGroup {
+  key: string;
+  platform: string;
+  modelUsed?: string;
+  region?: string;
+  results: PromptResultWithText[];
+  latest: PromptResultWithText;
+  latestScore: number;
+  avgScore: number;
+  totalMentions: number;
+  totalCitations: number;
+}
+
+interface PromptGroup {
+  promptId: string;
+  promptText: string;
+  promptCategory?: string;
+  results: PromptResultWithText[];
+  platformGroups: PlatformGroup[];
+  avgScore: number;
+  totalMentions: number;
+  totalCitations: number;
+}
+
+function groupResultsByPlatform(items: PromptResultWithText[]): PlatformGroup[] {
+  const map = new Map<string, PromptResultWithText[]>();
+  for (const r of items) {
+    const key = `${r.platform}|${r.modelUsed ?? ''}`;
+    const arr = map.get(key) || [];
+    arr.push(r);
+    map.set(key, arr);
+  }
+
+  return Array.from(map.entries())
+    .map(([key, arr]) => {
+      const sorted = [...arr].sort(
+        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+      );
+      const latest = sorted[0];
+      return {
+        key,
+        platform: latest.platform,
+        modelUsed: latest.modelUsed,
+        region: latest.region,
+        results: sorted,
+        latest,
+        latestScore: latest.visibilityScore,
+        avgScore:
+          Math.round(
+            (sorted.reduce((s, r) => s + r.visibilityScore, 0) / sorted.length) * 10,
+          ) / 10,
+        totalMentions: sorted.reduce((s, r) => s + r.mentionCount, 0),
+        totalCitations: sorted.reduce((s, r) => s + r.citationCount, 0),
+      } satisfies PlatformGroup;
+    })
+    .sort((a, b) => b.latestScore - a.latestScore);
+}
+
+function computePromptGroup(promptId: string, items: PromptResultWithText[]): PromptGroup {
+  const sorted = [...items].sort(
+    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+  );
+  return {
+    promptId,
+    promptText: sorted[0].promptText,
+    promptCategory: sorted[0].promptCategory,
+    results: sorted,
+    platformGroups: groupResultsByPlatform(sorted),
+    avgScore: Math.round(
+      sorted.reduce((s, r) => s + r.visibilityScore, 0) / sorted.length,
+    ),
+    totalMentions: sorted.reduce((s, r) => s + r.mentionCount, 0),
+    totalCitations: sorted.reduce((s, r) => s + r.citationCount, 0),
+  };
+}
+
+function groupResultsByPrompt(results: PromptResultWithText[]): PromptGroup[] {
+  const map = new Map<string, PromptResultWithText[]>();
+  for (const r of results) {
+    const arr = map.get(r.promptId) || [];
+    arr.push(r);
+    map.set(r.promptId, arr);
+  }
+  return Array.from(map.entries()).map(([promptId, items]) =>
+    computePromptGroup(promptId, items),
+  );
+}
+
+interface TopicGroup {
+  topicId: string;
+  topicName: string;
+  prompts: PromptGroup[];
+  avgScore: number;
+  totalMentions: number;
+  totalCitations: number;
+  totalResults: number;
+}
+
+function groupResultsByTopic(results: PromptResultWithText[]): TopicGroup[] {
+  const topicMap = new Map<string, PromptResultWithText[]>();
+  for (const r of results) {
+    const key = r.topicName ?? '__uncategorized__';
+    const arr = topicMap.get(key) || [];
+    arr.push(r);
+    topicMap.set(key, arr);
+  }
+
+  return Array.from(topicMap.entries())
+    .map(([topicName, items]) => {
+      const promptMap = new Map<string, PromptResultWithText[]>();
+      for (const r of items) {
+        const arr = promptMap.get(r.promptId) || [];
+        arr.push(r);
+        promptMap.set(r.promptId, arr);
+      }
+      const prompts = Array.from(promptMap.entries()).map(([pid, pItems]) =>
+        computePromptGroup(pid, pItems),
+      );
+      return {
+        topicId: items[0].topicId ?? `__cat_${topicName}`,
+        topicName: topicName === '__uncategorized__' ? 'Uncategorized' : topicName,
+        prompts,
+        avgScore: Math.round(
+          items.reduce((s, r) => s + r.visibilityScore, 0) / items.length,
+        ),
+        totalMentions: items.reduce((s, r) => s + r.mentionCount, 0),
+        totalCitations: items.reduce((s, r) => s + r.citationCount, 0),
+        totalResults: items.length,
+      };
+    })
+    .sort((a, b) => b.avgScore - a.avgScore);
+}
+
+// ─── Delta Badge ──────────────────────────────────────────────────────────────
+
+function DeltaBadge({
+  delta,
+  suffix = '%',
+}: {
+  delta: number | null;
+  suffix?: string;
+}) {
+  if (delta === null) return null;
+  if (delta === 0)
+    return <span className="text-xs text-muted-foreground">— 0{suffix}</span>;
+  const pos = delta > 0;
+  return (
+    <span
+      className={cn(
+        'flex items-center gap-0.5 text-xs font-medium',
+        pos ? 'text-green-600 dark:text-green-400' : 'text-red-500',
+      )}
+    >
+      {pos ? (
+        <TrendingUp className="h-3 w-3" />
+      ) : (
+        <TrendingDown className="h-3 w-3" />
+      )}
+      {pos ? '+' : ''}
+      {delta}
+      {suffix}
+    </span>
+  );
+}
+
+// ─── KPI Card ─────────────────────────────────────────────────────────────────
+
+function KpiCard({
+  title,
+  tooltip,
+  icon: Icon,
+  value,
+  sub,
+  subVariant = 'muted',
+  onClick,
+}: {
+  title: string;
+  tooltip: string;
+  icon: React.ElementType;
+  value: React.ReactNode;
+  sub: React.ReactNode;
+  subVariant?: 'muted' | 'positive';
+  onClick?: () => void;
+}) {
+  const clickable = typeof onClick === 'function';
+  return (
+    <Card
+      onClick={clickable ? onClick : undefined}
+      role={clickable ? 'button' : undefined}
+      tabIndex={clickable ? 0 : undefined}
+      aria-label={clickable ? `${title} — view breakdown` : undefined}
+      title={clickable ? 'Click to see breakdown' : undefined}
+      onKeyDown={
+        clickable
+          ? (e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                onClick?.();
+              }
+            }
+          : undefined
+      }
+      className={cn(
+        'group relative',
+        clickable &&
+          'cursor-pointer transition-all duration-150 hover:border-foreground/30 hover:shadow-md hover:-translate-y-0.5 hover:bg-accent/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+      )}
+    >
+      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-1">
+        <CardTitle className="flex items-center gap-1 text-xs font-medium text-muted-foreground uppercase tracking-wide">
+          {title}
+          <InfoTip content={tooltip} />
+        </CardTitle>
+        <div className="relative flex h-4 w-4 items-center justify-center">
+          <Icon
+            className={cn(
+              'h-3.5 w-3.5 text-muted-foreground transition-opacity',
+              clickable && 'group-hover:opacity-0',
+            )}
+          />
+          {clickable && (
+            <ArrowUpRight
+              className="absolute h-4 w-4 text-foreground opacity-0 transition-opacity group-hover:opacity-100"
+              aria-hidden
+            />
+          )}
+        </div>
+      </CardHeader>
+      <CardContent>
+        <div className="text-3xl font-bold">{value}</div>
+        <p
+          className={cn(
+            'text-xs mt-1 flex items-center gap-0.5',
+            subVariant === 'positive'
+              ? 'text-green-600 dark:text-green-400'
+              : 'text-muted-foreground',
+          )}
+        >
+          {sub}
+        </p>
+        {clickable && (
+          <p className="mt-2 flex items-center gap-1 text-[10px] font-medium text-muted-foreground/70 opacity-0 transition-opacity group-hover:opacity-100">
+            View breakdown
+            <ArrowUpRight className="h-2.5 w-2.5" />
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+
+// ─── Run Single Prompt Dialog ─────────────────────────────────────────────────
+
+function RunSinglePromptDialog({
+  brandId,
+  open,
+  onClose,
+  onJobStarted,
+}: {
+  brandId: string;
+  open: boolean;
+  onClose: () => void;
+  onJobStarted: (jobId: string) => void;
+}) {
+  const [prompts, setPrompts] = useState<
+    { id: string; text: string; category?: string; platforms: string[] }[]
+  >([]);
+  const [loading, setLoading] = useState(false);
+  const [runningId, setRunningId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    setLoading(true);
+    getBrandPrompts(brandId)
+      .then(setPrompts)
+      .catch(() => toast.error('Failed to load prompts'))
+      .finally(() => setLoading(false));
+  }, [open, brandId]);
+
+  const handleRun = async (promptId: string) => {
+    setRunningId(promptId);
+    try {
+      const { jobId } = await triggerTrackingCheck(brandId, { promptId });
+      onClose();
+      onJobStarted(jobId);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to run prompt');
+    } finally {
+      setRunningId(null);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
+      <DialogContent className="max-w-[calc(100%-2rem)] sm:max-w-lg max-h-[70vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 text-base">
+            <FlaskConical className="h-4 w-4" />
+            Run Single Prompt
+          </DialogTitle>
+          <p className="text-sm text-muted-foreground">
+            Pick a prompt to test. Only that prompt will run across your enabled
+            platforms.
+          </p>
+        </DialogHeader>
+
+        <div className="space-y-2 pt-2">
+          {loading && (
+            <div className="space-y-2">
+              {Array.from({ length: 3 }).map((_, i) => (
+                <Skeleton key={i} className="h-14 w-full" />
+              ))}
+            </div>
+          )}
+
+          {!loading && prompts.length === 0 && (
+            <p className="text-sm text-muted-foreground py-6 text-center">
+              No active prompts found. Add prompts in brand settings first.
+            </p>
+          )}
+
+          {!loading &&
+            prompts.map((p) => (
+              <div
+                key={p.id}
+                className="flex items-center gap-3 rounded-lg border p-3 hover:bg-muted/50 transition-colors"
+              >
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium line-clamp-2">{p.text}</p>
+                  {p.category && (
+                    <Badge variant="outline" className="text-[10px] mt-1">
+                      {p.category}
+                    </Badge>
+                  )}
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="gap-1.5 shrink-0"
+                  disabled={runningId !== null}
+                  onClick={() => handleRun(p.id)}
+                >
+                  {runningId === p.id ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Play className="h-3.5 w-3.5" />
+                  )}
+                  Run
+                </Button>
+              </div>
+            ))}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ─── Filter Bar ───────────────────────────────────────────────────────────────
+
+function FilterBar({
+  filters,
+  onChange,
+  availableRegions,
+  availableModels,
+  availableTopics,
+}: {
+  filters: InsightsFilters;
+  onChange: (f: InsightsFilters) => void;
+  availableRegions: string[];
+  availableModels: string[];
+  availableTopics: Topic[];
+}) {
+  const set = (patch: Partial<InsightsFilters>) =>
+    onChange({ ...filters, ...patch });
+
+  return (
+    <div className="flex flex-wrap items-end gap-3">
+      {/* Date presets */}
+      <div>
+        <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
+          Date Range
+        </label>
+        <div className="flex rounded-md border overflow-hidden">
+          {(['24h', '7d', '30d', '90d', 'all', 'custom'] as DatePreset[]).map(
+            (p) => (
+              <button
+                key={p}
+                type="button"
+                onClick={() => set({ datePreset: p })}
+                className={cn(
+                  'px-3 py-1.5 text-xs font-medium transition-colors',
+                  filters.datePreset === p
+                    ? 'bg-primary text-primary-foreground'
+                    : 'bg-card hover:bg-muted text-foreground',
+                )}
+              >
+                {p === 'custom' ? 'Custom' : p === 'all' ? 'All' : p}
+              </button>
+            ),
+          )}
+        </div>
+      </div>
+
+      {/* Custom date inputs */}
+      {filters.datePreset === 'custom' && (
+        <>
+          <div>
+            <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
+              From
+            </label>
+            <Input
+              type="date"
+              value={filters.dateFrom}
+              onChange={(e) => set({ dateFrom: e.target.value })}
+              className="h-8 w-36 text-xs"
+            />
+          </div>
+          <div>
+            <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
+              To
+            </label>
+            <Input
+              type="date"
+              value={filters.dateTo}
+              onChange={(e) => set({ dateTo: e.target.value })}
+              className="h-8 w-36 text-xs"
+            />
+          </div>
+        </>
+      )}
+
+      {/* Topic filter */}
+      {availableTopics.length > 0 && (
+        <div>
+          <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
+            Topic
+          </label>
+          <Select
+            value={filters.topic || null}
+            onValueChange={(v) => set({ topic: !v || v === '__all__' ? '' : v })}
+          >
+            <SelectTrigger className="h-8 w-40 text-xs">
+              <SelectValue placeholder="All Topics">
+                {(value) =>
+                  value && value !== '__all__'
+                    ? availableTopics.find((t) => t.id === value)?.name ?? 'All Topics'
+                    : 'All Topics'
+                }
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__all__">All Topics</SelectItem>
+              {availableTopics.map((t) => (
+                <SelectItem key={t.id} value={t.id}>
+                  {t.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      )}
+
+      {/* Region filter */}
+      <div>
+        <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
+          Region
+        </label>
+        <Select
+          value={filters.region || null}
+          onValueChange={(v) => set({ region: !v || v === '__all__' ? '' : v })}
+        >
+          <SelectTrigger className="h-8 w-32 text-xs">
+            <SelectValue placeholder="All Regions" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="__all__">All Regions</SelectItem>
+            {availableRegions.map((r) => (
+              <SelectItem key={r} value={r}>
+                {r}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+
+      {/* Model filter */}
+      <div>
+        <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
+          AI Model
+        </label>
+        <Select
+          value={filters.model || null}
+          onValueChange={(v) => set({ model: !v || v === '__all__' ? '' : v })}
+        >
+          <SelectTrigger className="h-8 w-44 text-xs">
+            <SelectValue placeholder="All Platforms" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="__all__">All Platforms</SelectItem>
+            {availableModels.map((m) => (
+              <SelectItem key={m} value={m}>
+                {MODEL_DISPLAY_NAME[m] ??
+                  PLATFORM_LABELS[m] ??
+                  getAIProviderDisplayName(resolveAIProvider(m))}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+    </div>
+  );
+}
+
+// ─── Loading Skeleton ─────────────────────────────────────────────────────────
+
+function InsightsSkeleton() {
+  return (
+    <div className="space-y-6">
+      <div className="flex items-start justify-between gap-4">
+        <div className="space-y-2">
+          <Skeleton className="h-8 w-64" />
+          <Skeleton className="h-4 w-80" />
+        </div>
+        <Skeleton className="h-10 w-32" />
+      </div>
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+        {Array.from({ length: 4 }).map((_, i) => (
+          <Card key={i}>
+            <CardContent className="pt-6 space-y-2">
+              <Skeleton className="h-4 w-24" />
+              <Skeleton className="h-8 w-16" />
+              <Skeleton className="h-3 w-32" />
+          </CardContent>
+        </Card>
+        ))}
+      </div>
+        <Card>
+        <CardContent className="pt-6">
+          <Skeleton className="h-48 w-full" />
+          </CardContent>
+        </Card>
+      </div>
+  );
+}
+
+// ─── Empty State ──────────────────────────────────────────────────────────────
+
+function EmptyState({
+  onRunPrompts,
+  isRunning,
+  isCloud,
+}: {
+  onRunPrompts: () => void;
+  isRunning: boolean;
+  isCloud: boolean;
+}) {
+  return (
+    <div className="flex flex-col items-center justify-center py-20 text-center">
+      <BarChart3 className="h-12 w-12 text-muted-foreground/40 mb-4" />
+      <h2 className="text-lg font-semibold">No tracking data yet</h2>
+      <p className="text-muted-foreground text-sm mt-1 max-w-md">
+        Run your prompts through AI platforms to see how your brand appears in
+        AI-generated responses.
+      </p>
+      {!isCloud && (
+        <Button
+          onClick={onRunPrompts}
+          disabled={isRunning}
+          className="mt-6 gap-2"
+        >
+          {isRunning ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <Play className="h-4 w-4" />
+          )}
+          Run Prompts Now
+        </Button>
+      )}
+    </div>
+  );
+}
+
+function NoDataForPeriod({
+  datePreset,
+  onReset,
+}: {
+  datePreset: DatePreset;
+  onReset: () => void;
+}) {
+  const labels: Record<DatePreset, string> = {
+    '24h': 'last 24 hours',
+    '7d': 'last 7 days',
+    '30d': 'last 30 days',
+    '90d': 'last 90 days',
+    all: 'selected period',
+    custom: 'selected period',
+  };
+  return (
+    <div className="flex flex-col items-center justify-center py-16 text-center">
+      <CalendarX2 className="h-10 w-10 text-muted-foreground/40 mb-3" />
+      <h3 className="text-base font-semibold">
+        No results for the {labels[datePreset]}
+      </h3>
+      <p className="text-muted-foreground text-sm mt-1 max-w-sm">
+        There is tracking data available in other time periods. Try a wider
+        range or switch to &quot;All time&quot;.
+      </p>
+      <Button variant="outline" size="sm" className="mt-4" onClick={onReset}>
+        Show all data
+      </Button>
+    </div>
+  );
+}
+
+// ─── Tracking Progress ────────────────────────────────────────────────────────
+
+import { saveTrackingJob, loadTrackingJob, clearTrackingJob } from '@/lib/tracking-job-store';
+
+function TrackingProgressBanner({
+  jobStatus,
+  onStop,
+}: {
+  jobStatus: TrackingJobStatus | null;
+  onStop: () => void;
+}) {
+  if (!jobStatus) return null;
+
+  const isActive =
+    jobStatus.status === 'active' || jobStatus.status === 'waiting';
+  if (!isActive) return null;
+
+  const progress = jobStatus.progress;
+  const pct = progress
+    ? Math.round((progress.current / progress.total) * 100)
+    : 0;
+
+  return (
+    <div className="rounded-lg border border-primary/20 bg-primary/5 px-4 py-3 space-y-2">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <Loader2 className="h-4 w-4 animate-spin text-primary" />
+          <span className="text-sm font-medium">
+            {jobStatus.status === 'waiting'
+              ? 'Queued — waiting to start...'
+              : 'Analyzing prompts...'}
+          </span>
+          {progress && (
+            <span className="text-xs text-muted-foreground tabular-nums">
+              {progress.current}/{progress.total}
+            </span>
+          )}
+        </div>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 gap-1.5 text-xs text-destructive hover:text-destructive hover:bg-destructive/10"
+          onClick={onStop}
+        >
+          <StopCircle className="h-3.5 w-3.5" />
+          Stop
+        </Button>
+      </div>
+
+      {progress && progress.total > 0 && (
+        <>
+          <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
+            <div
+              className="h-full rounded-full bg-primary transition-all duration-500"
+              style={{ width: `${Math.max(pct, 2)}%` }}
+            />
+          </div>
+          {progress.promptText && (
+            <p className="text-xs text-muted-foreground truncate">
+              {progress.model && (
+                <span className="font-medium text-foreground">
+                  {PLATFORM_LABELS[progress.model] ?? progress.model}
+                  {progress.region && <span> · {progress.region}</span>}
+                  {' — '}
+                </span>
+              )}
+              {progress.promptText}
+            </p>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ─── Prompt Results Grouped ───────────────────────────────────────────────────
+
+function formatTimestamp(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+}
+
+function PlatformSubGroup({
+  group,
+  expanded,
+  onToggle,
+  onViewResult,
+}: {
+  group: PlatformGroup;
+  expanded: boolean;
+  onToggle: () => void;
+  onViewResult: (r: PromptResultWithText) => void;
+}) {
+  const HISTORY_LIMIT = 8;
+  const history = group.results.slice(1, 1 + HISTORY_LIMIT);
+  const hasMoreHistory = group.results.length > 1 + HISTORY_LIMIT;
+  const latest = group.latest;
+  const responsePreview =
+    (latest.response ?? '').trim().length > 0
+      ? latest.response
+      : 'No response text available.';
+
+  return (
+    <div className="rounded-md border bg-background/50">
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={onToggle}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle(); }
+        }}
+        className="flex w-full items-center gap-3 px-3 py-2 hover:bg-muted/40 transition-colors cursor-pointer select-none"
+      >
+        <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform', !expanded && '-rotate-90')} />
+        <div className="flex-1 min-w-0 flex items-center gap-2">
+          <ModelBadge
+            model={latest.modelUsed ?? latest.platform}
+            platform={latest.platform}
+          />
+          {latest.region && (
+            <Badge variant="outline" className="text-[10px]">{latest.region}</Badge>
+          )}
+          <span className="text-[10px] text-muted-foreground tabular-nums ml-1">
+            {group.results.length} run{group.results.length !== 1 ? 's' : ''}
+          </span>
+        </div>
+        <div className="flex items-center gap-4 shrink-0">
+          <div className="hidden sm:block text-right">
+            <p className="text-[10px] text-muted-foreground">Mentions</p>
+            <p className="text-xs font-semibold tabular-nums">{latest.mentionCount}</p>
+          </div>
+          <div className="hidden sm:block text-right">
+            <p className="text-[10px] text-muted-foreground">Citations</p>
+            <p className="text-xs font-semibold tabular-nums">{latest.citationCount}</p>
+          </div>
+          <SentimentBadge sentiment={latest.sentiment} />
+          <div className="w-[100px] sm:w-[140px]">
+            <VisibilityBar score={latest.visibilityScore} />
+          </div>
+        </div>
+      </div>
+
+      {expanded && (
+        <div className="border-t bg-muted/20 px-4 py-3 space-y-3">
+          <div>
+            <div className="flex items-center justify-between gap-3 mb-1.5">
+              <p className="text-[10px] uppercase tracking-wide text-muted-foreground font-medium">
+                Latest response · {formatTimestamp(latest.createdAt)}
+              </p>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 gap-1.5 text-[11px]"
+                onClick={(e) => { e.stopPropagation(); onViewResult(latest); }}
+              >
+                <Eye className="h-3 w-3" />
+                Full detail
+              </Button>
+            </div>
+            <p className="text-xs text-foreground/90 leading-relaxed whitespace-pre-wrap line-clamp-6">
+              {responsePreview}
+            </p>
+          </div>
+
+          {history.length > 0 && (
+            <div>
+              <p className="text-[10px] uppercase tracking-wide text-muted-foreground font-medium mb-1">
+                Previous runs
+              </p>
+              <div className="rounded border overflow-hidden">
+                <Table>
+                  <TableBody>
+                    {history.map((r) => (
+                      <TableRow key={r.id} className="hover:bg-muted/30">
+                        <TableCell className="text-xs text-muted-foreground py-1.5">
+                          {formatTimestamp(r.createdAt)}
+                        </TableCell>
+                        <TableCell className="text-center py-1.5 text-xs tabular-nums w-[110px]">
+                          <span className="font-semibold">{r.mentionCount}</span>
+                          <span className="text-muted-foreground">
+                            {' '}mention{r.mentionCount !== 1 ? 's' : ''}
+                          </span>
+                        </TableCell>
+                        <TableCell className="text-center py-1.5 text-xs tabular-nums w-[110px]">
+                          <span className="font-semibold">{r.citationCount}</span>
+                          <span className="text-muted-foreground">
+                            {' '}citation{r.citationCount !== 1 ? 's' : ''}
+                          </span>
+                        </TableCell>
+                        <TableCell className="text-center py-1.5 w-[100px]">
+                          <SentimentBadge sentiment={r.sentiment} />
+                        </TableCell>
+                        <TableCell className="py-1.5 w-[140px]">
+                          <VisibilityBar score={r.visibilityScore} />
+                        </TableCell>
+                        <TableCell className="text-center py-1.5 w-[50px]">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-6 w-6"
+                            title="View detail"
+                            onClick={(e) => { e.stopPropagation(); onViewResult(r); }}
+                          >
+                            <Eye className="h-3 w-3" />
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+              {hasMoreHistory && (
+                <p className="text-[10px] text-muted-foreground mt-1">
+                  Showing latest {HISTORY_LIMIT} of {group.results.length - 1} previous runs.
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PromptSubGroup({
+  group,
+  expanded,
+  expandedPlatforms,
+  refreshingId,
+  onToggle,
+  onTogglePlatform,
+  onRefresh,
+  onViewResult,
+}: {
+  group: PromptGroup;
+  expanded: boolean;
+  expandedPlatforms: Set<string>;
+  refreshingId: string | null;
+  onToggle: () => void;
+  onTogglePlatform: (compositeKey: string) => void;
+  onRefresh: (promptId: string) => void;
+  onViewResult: (r: PromptResultWithText) => void;
+}) {
+  return (
+    <div className="rounded-lg border overflow-hidden">
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={onToggle}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle(); }
+        }}
+        className="flex w-full items-center gap-3 px-4 py-2.5 text-left hover:bg-muted/50 transition-colors cursor-pointer select-none"
+      >
+        <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform', !expanded && '-rotate-90')} />
+        <div className="flex-1 min-w-0">
+          <p className="text-sm line-clamp-1">{group.promptText}</p>
+          <span className="text-[11px] text-muted-foreground">
+            {group.platformGroups.length} platform{group.platformGroups.length !== 1 ? 's' : ''}
+            {' · '}
+            {group.results.length} result{group.results.length !== 1 ? 's' : ''}
+          </span>
+        </div>
+        <div className="flex items-center gap-4 shrink-0">
+          <div className="text-right">
+            <p className="text-[10px] text-muted-foreground">Score</p>
+            <p className="text-xs font-semibold tabular-nums">{group.avgScore}</p>
+          </div>
+          <div className="text-right">
+            <p className="text-[10px] text-muted-foreground">Mentions</p>
+            <p className="text-xs font-semibold tabular-nums">{group.totalMentions}</p>
+          </div>
+          <div className="text-right">
+            <p className="text-[10px] text-muted-foreground">Citations</p>
+            <p className="text-xs font-semibold tabular-nums">{group.totalCitations}</p>
+          </div>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-6 w-6"
+            title="Refresh results"
+            disabled={refreshingId !== null}
+            onClick={(e) => { e.stopPropagation(); onRefresh(group.promptId); }}
+          >
+            {refreshingId === group.promptId ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              <RefreshCw className="h-3 w-3" />
+            )}
+          </Button>
+        </div>
+      </div>
+
+      {expanded && (
+        <div className="border-t px-3 py-2 space-y-1.5 bg-muted/10">
+          {group.platformGroups.map((pg) => {
+            const compositeKey = `${group.promptId}::${pg.key}`;
+            return (
+              <PlatformSubGroup
+                key={compositeKey}
+                group={pg}
+                expanded={expandedPlatforms.has(compositeKey)}
+                onToggle={() => onTogglePlatform(compositeKey)}
+                onViewResult={onViewResult}
+              />
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PromptResultsGrouped({
+  results,
+  loadedRowCount,
+  totalRowCount,
+  onViewResult,
+  onRefreshPrompt,
+}: {
+  results: PromptResultWithText[];
+  loadedRowCount: number;
+  totalRowCount: number;
+  onViewResult: (r: PromptResultWithText) => void;
+  onRefreshPrompt: (promptId: string) => Promise<void>;
+}) {
+  const topicGroups = groupResultsByTopic(results);
+  const [expandedTopics, setExpandedTopics] = useState<Set<string>>(new Set());
+  const [expandedPrompts, setExpandedPrompts] = useState<Set<string>>(new Set());
+  const [expandedPlatforms, setExpandedPlatforms] = useState<Set<string>>(new Set());
+  const [refreshingId, setRefreshingId] = useState<string | null>(null);
+
+  const toggleTopic = (id: string) =>
+    setExpandedTopics((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+
+  const togglePrompt = (id: string) =>
+    setExpandedPrompts((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+
+  const togglePlatform = (id: string) =>
+    setExpandedPlatforms((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+
+  const handleRefresh = async (promptId: string) => {
+    setRefreshingId(promptId);
+    try { await onRefreshPrompt(promptId); } finally { setRefreshingId(null); }
+  };
+
+  const truncated = totalRowCount > loadedRowCount && loadedRowCount > 0;
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <div className="flex flex-col gap-0.5 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
+          <CardTitle className="text-sm font-medium">Prompt Results by Topic</CardTitle>
+          {truncated && (
+            <p className="text-xs text-muted-foreground font-normal">
+              Showing {loadedRowCount} of {totalRowCount} rows (newest first).
+              Narrow the date range or filters to focus the list.
+            </p>
+          )}
+        </div>
+      </CardHeader>
+      <CardContent className="pt-0">
+        {topicGroups.length === 0 && (
+          <p className="text-center text-muted-foreground py-8 text-sm">
+            No results yet. Click &quot;Run Prompts&quot; to start tracking.
+          </p>
+        )}
+
+        <div className="space-y-3">
+          {topicGroups.map((topic) => {
+            const isTopicOpen = expandedTopics.has(topic.topicId);
+            return (
+              <div key={topic.topicId + topic.topicName} className="rounded-lg border overflow-hidden">
+                <div
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => toggleTopic(topic.topicId)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleTopic(topic.topicId); }
+                  }}
+                  className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-muted/50 transition-colors cursor-pointer select-none"
+                >
+                  <ChevronDown className={cn('h-4 w-4 shrink-0 text-muted-foreground transition-transform', !isTopicOpen && '-rotate-90')} />
+                  <Tag className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium">{topic.topicName}</p>
+                    <span className="text-[11px] text-muted-foreground">
+                      {topic.prompts.length} prompt{topic.prompts.length !== 1 ? 's' : ''} · {topic.totalResults} result{topic.totalResults !== 1 ? 's' : ''}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-4 shrink-0">
+                    <div className="text-right">
+                      <p className="text-xs text-muted-foreground">Avg Score</p>
+                      <p className="text-sm font-semibold tabular-nums">{topic.avgScore}</p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-xs text-muted-foreground">Mentions</p>
+                      <p className="text-sm font-semibold tabular-nums">{topic.totalMentions}</p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-xs text-muted-foreground">Citations</p>
+                      <p className="text-sm font-semibold tabular-nums">{topic.totalCitations}</p>
+                    </div>
+                  </div>
+                </div>
+
+                {isTopicOpen && (
+                  <div className="border-t px-3 py-2 space-y-2 bg-muted/10">
+                    {topic.prompts.map((pg) => (
+                      <PromptSubGroup
+                        key={pg.promptId}
+                        group={pg}
+                        expanded={expandedPrompts.has(pg.promptId)}
+                        expandedPlatforms={expandedPlatforms}
+                        refreshingId={refreshingId}
+                        onToggle={() => togglePrompt(pg.promptId)}
+                        onTogglePlatform={togglePlatform}
+                        onRefresh={handleRefresh}
+                        onViewResult={onViewResult}
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+// ─── Main Page ────────────────────────────────────────────────────────────────
+
+export default function InsightsPage() {
+  const router = useRouter();
+  const { isCloud } = usePlanContext();
+  const brand = useBrandStore((s) => s.getActiveBrand());
+  const [summary, setSummary] = useState<InsightsSummary | null>(null);
+  const [results, setResults] = useState<PromptResultWithText[]>([]);
+  const [totalResults, setTotalResults] = useState(0);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isRunning, setIsRunning] = useState(false);
+  const [activeJobId, setActiveJobId] = useState<string | null>(null);
+  const [jobStatus, setJobStatus] = useState<TrackingJobStatus | null>(null);
+  const [showSinglePrompt, setShowSinglePrompt] = useState(false);
+  const [filters, setFilters] = useState<InsightsFilters>(DEFAULT_FILTERS);
+  const [hasAnyData, setHasAnyData] = useState<boolean | null>(null);
+  const [availableRegions, setAvailableRegions] = useState<string[]>([]);
+  const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const [availableTopics, setAvailableTopics] = useState<Topic[]>([]);
+  const [competitorData, setCompetitorData] =
+    useState<CompetitorComparisonData | null>(null);
+  const [sovData, setSovData] = useState<ShareOfVoiceData | null>(null);
+  const [breakdownMetric, setBreakdownMetric] = useState<BreakdownMetric | null>(null);
+  const filtersRef = useRef(filters);
+  filtersRef.current = filters;
+
+  const loadData = useCallback(
+    async (overrideFilters?: InsightsFilters, { silent = false } = {}) => {
+      if (!brand) return;
+      if (!silent) setIsLoading(true);
+      try {
+        const f = overrideFilters ?? filtersRef.current;
+        const { dateFrom, dateTo } = getDateRange(f.datePreset, {
+          from: f.dateFrom,
+          to: f.dateTo,
+        });
+        const filterOpts = {
+          model: f.model || undefined,
+          region: f.region || undefined,
+          topicId: f.topic || undefined,
+          dateFrom,
+          dateTo,
+        };
+
+        const hasFilters = f.datePreset !== 'all' || f.model || f.region || f.topic;
+
+        const promises: [
+          Promise<InsightsSummary>,
+          Promise<{ results: PromptResultWithText[]; total: number }>,
+          Promise<CompetitorComparisonData>,
+          Promise<ShareOfVoiceData>,
+          Promise<{ total: number } | null>,
+        ] = [
+          getInsightsSummary(brand.id, filterOpts),
+          getPromptResults(brand.id, {
+            limit: PROMPT_RESULTS_ROW_LIMIT,
+            ...filterOpts,
+          }),
+          getCompetitorComparison(brand.id, filterOpts),
+          getShareOfVoiceData(brand.id, filterOpts),
+          hasFilters
+            ? getPromptResults(brand.id, { limit: 1 }).then(({ total }) => ({ total }))
+            : Promise.resolve(null),
+        ];
+
+        const [summaryData, resultsData, compData, sovResult, unfilteredCheck] = await Promise.all(promises);
+        setSummary(summaryData);
+        setResults(resultsData.results);
+        setTotalResults(resultsData.total);
+        setCompetitorData(compData.brands.length > 1 ? compData : null);
+        setSovData(sovResult.byPlatform.length > 0 ? sovResult : null);
+
+        if (unfilteredCheck !== null) {
+          setHasAnyData(unfilteredCheck.total > 0);
+        } else {
+          setHasAnyData(resultsData.total > 0);
+        }
+
+        const regions = [
+          ...new Set(
+            resultsData.results
+              .map((r) => r.region)
+              .filter(Boolean) as string[],
+          ),
+        ].sort();
+        const models = [
+          ...new Set(
+            resultsData.results
+              .map((r) => r.modelUsed)
+              .filter(Boolean) as string[],
+          ),
+        ].sort();
+        setAvailableRegions((prev) =>
+          [...new Set([...prev, ...regions])].sort((a, b) =>
+            a.localeCompare(b),
+          ),
+        );
+        setAvailableModels((prev) =>
+          [...new Set([...prev, ...models])].sort((a, b) =>
+            a.localeCompare(b),
+          ),
+        );
+      } catch (err) {
+        toast.error(
+          err instanceof Error ? err.message : 'Failed to load insights',
+        );
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    [brand],
+  );
+
+  useEffect(() => {
+    if (!brand?.id) return;
+    setAvailableRegions([]);
+    setAvailableModels([]);
+    setAvailableTopics([]);
+    const next = { ...filtersRef.current, region: '', model: '', topic: '' };
+    filtersRef.current = next;
+    setFilters(next);
+    getTopics(brand.id).then(setAvailableTopics).catch(() => {});
+  }, [brand?.id]);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
+
+  // Restore active job from localStorage or URL query param (post-payment redirect)
+  const searchParams = useSearchParams();
+  useEffect(() => {
+    if (!brand) return;
+
+    const urlJobId = searchParams.get('jobId');
+    if (urlJobId) {
+      saveTrackingJob({ jobId: urlJobId, brandId: brand.id, startedAt: Date.now() });
+      setActiveJobId(urlJobId);
+      setIsRunning(true);
+      window.history.replaceState({}, '', window.location.pathname);
+      return;
+    }
+
+    const saved = loadTrackingJob();
+    if (saved && saved.brandId === brand.id) {
+      setActiveJobId(saved.jobId);
+      setIsRunning(true);
+    }
+  }, [brand, searchParams]);
+
+  // Poll job status while a job is active
+  useEffect(() => {
+    if (!activeJobId) return;
+
+    let cancelled = false;
+    let lastRefresh = 0;
+    const poll = async () => {
+      while (!cancelled) {
+        try {
+          const status = await getJobStatus(activeJobId);
+          if (cancelled) break;
+          setJobStatus(status);
+
+          // Refresh data every ~10s while active so new results appear progressively
+          const now = Date.now();
+          if (status.status === 'active' && now - lastRefresh > 10_000) {
+            lastRefresh = now;
+            loadData(undefined, { silent: true });
+          }
+
+          if (status.status === 'completed') {
+            clearTrackingJob();
+            setActiveJobId(null);
+            setIsRunning(false);
+            setJobStatus(null);
+            toast.success(
+              `Analysis complete — ${status.result?.resultCount ?? 0} results saved.`,
+            );
+            loadData(undefined, { silent: true });
+            break;
+          }
+
+          if (status.status === 'failed' || status.status === 'not_found') {
+            clearTrackingJob();
+            setActiveJobId(null);
+            setIsRunning(false);
+            setJobStatus(null);
+            if (status.status === 'failed') {
+              toast.error(
+                `Job failed: ${status.failedReason ?? 'Unknown error'}`,
+              );
+            }
+            break;
+          }
+        } catch {
+          // network error, keep polling
+        }
+        await new Promise((r) => setTimeout(r, 3000));
+      }
+    };
+
+    poll();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeJobId, loadData]);
+
+  const handleFilterChange = (newFilters: InsightsFilters) => {
+    setFilters(newFilters);
+    loadData(newFilters);
+  };
+
+  const handleRunPrompts = async () => {
+    if (!brand) return;
+    setIsRunning(true);
+    try {
+      const { jobId } = await triggerTrackingCheck(brand.id);
+      saveTrackingJob({ jobId, brandId: brand.id, startedAt: Date.now() });
+      setActiveJobId(jobId);
+      setJobStatus({
+        status: 'waiting',
+        progress: null,
+        result: null,
+        failedReason: null,
+      });
+    } catch (err) {
+      setIsRunning(false);
+      toast.error(
+        err instanceof Error ? err.message : 'Failed to trigger tracking',
+      );
+    }
+  };
+
+  const handleStopTracking = async () => {
+    if (!activeJobId) return;
+    try {
+      await cancelTrackingJob(activeJobId);
+    } catch {}
+    clearTrackingJob();
+    setActiveJobId(null);
+    setIsRunning(false);
+    setJobStatus(null);
+    toast.success('Tracking stopped');
+    loadData(undefined, { silent: true });
+  };
+
+  const handleJobStarted = (jobId: string) => {
+    if (!brand) return;
+    setIsRunning(true);
+    saveTrackingJob({ jobId, brandId: brand.id, startedAt: Date.now() });
+    setActiveJobId(jobId);
+    setJobStatus({
+      status: 'waiting',
+      progress: null,
+      result: null,
+      failedReason: null,
+    });
+  };
+
+  const handleRefreshPrompt = async (promptId: string) => {
+    if (!brand) return;
+    try {
+      const { dateFrom, dateTo } = getDateRange(filtersRef.current.datePreset, {
+        from: filtersRef.current.dateFrom,
+        to: filtersRef.current.dateTo,
+      });
+      const { results: fresh } = await getPromptResults(brand.id, {
+        promptId,
+        dateFrom,
+        dateTo,
+        limit: 500,
+      });
+      // Merge fresh results into existing state — replace old entries for this prompt
+      setResults((prev) => {
+        const without = prev.filter((r) => r.promptId !== promptId);
+        return [...without, ...fresh];
+      });
+      toast.success('Results refreshed');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to refresh results');
+    }
+  };
+
+  if (!brand || (isLoading && !summary)) return <InsightsSkeleton />;
+
+  const noResults = !summary || summary.totalResults === 0;
+  const trulyEmpty = noResults && !hasAnyData;
+
+  if (trulyEmpty) {
+    return (
+      <div className="space-y-6">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">
+            Answer Engine Insights
+          </h1>
+          <p className="text-muted-foreground text-sm">{brand.name}</p>
+        </div>
+        <TrackingProgressBanner
+          jobStatus={jobStatus}
+          onStop={handleStopTracking}
+        />
+        <EmptyState onRunPrompts={handleRunPrompts} isRunning={isRunning} isCloud={isCloud} />
+        {!isCloud && (
+          <div className="flex justify-center">
+            <Button
+              variant="outline"
+              onClick={() => setShowSinglePrompt(true)}
+              className="gap-2"
+            >
+              <FlaskConical className="h-4 w-4" />
+              Or test a single prompt
+            </Button>
+          </div>
+        )}
+        <RunSinglePromptDialog
+          brandId={brand.id}
+          open={showSinglePrompt}
+          onClose={() => setShowSinglePrompt(false)}
+          onJobStarted={handleJobStarted}
+        />
+      </div>
+    );
+  }
+
+  const lastCheckedLabel = summary?.lastCheckedAt
+    ? formatTimeAgo(new Date(summary.lastCheckedAt))
+    : 'Never';
+
+  const handleResetFilters = () => {
+    const resetFilters = { ...DEFAULT_FILTERS };
+    setFilters(resetFilters);
+    loadData(resetFilters);
+  };
+
+  return (
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">
+            Answer Engine Insights
+          </h1>
+          <p className="text-muted-foreground text-sm">
+            {brand.name} · Last run: {lastCheckedLabel} · {totalResults} results
+          </p>
+        </div>
+        {!isCloud && (
+          <div className="flex items-center gap-2 shrink-0">
+            <Button
+              variant="outline"
+              onClick={() => setShowSinglePrompt(true)}
+              className="gap-2"
+            >
+              <FlaskConical className="h-4 w-4" />
+              Test Single Prompt
+            </Button>
+            <Button
+              onClick={handleRunPrompts}
+              disabled={isRunning}
+              className="gap-2"
+            >
+              {isRunning ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Play className="h-4 w-4" />
+              )}
+              Run All
+            </Button>
+          </div>
+        )}
+      </div>
+
+      {/* Filter Bar */}
+      <FilterBar
+        filters={filters}
+        onChange={handleFilterChange}
+        availableRegions={availableRegions}
+        availableModels={availableModels}
+        availableTopics={availableTopics}
+      />
+
+      {/* Tracking Progress */}
+      <TrackingProgressBanner
+        jobStatus={jobStatus}
+        onStop={handleStopTracking}
+      />
+
+      {noResults ? (
+        <NoDataForPeriod
+          datePreset={filters.datePreset}
+          onReset={handleResetFilters}
+        />
+      ) : (
+        <>
+          {/* KPI Cards */}
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+            <KpiCard
+              title="Visibility Score"
+              tooltip="A composite score (0–100) reflecting how prominently your brand appears across AI engine responses. Combines mentions, citations, and sentiment."
+              icon={BarChart3}
+              value={summary!.avgVisibilityScore}
+              sub={<DeltaBadge delta={summary!.visibilityChange} suffix=" pts" />}
+              subVariant={
+                summary!.visibilityChange !== null && summary!.visibilityChange > 0
+                  ? 'positive'
+                  : 'muted'
+              }
+              onClick={() => setBreakdownMetric('visibility')}
+            />
+            <KpiCard
+              title="Mentions"
+              tooltip="How many times your brand was referenced by name in AI-generated responses."
+              icon={Zap}
+              value={summary!.totalMentions}
+              sub={<DeltaBadge delta={summary!.mentionsChange} />}
+              subVariant={
+                summary!.mentionsChange !== null && summary!.mentionsChange > 0
+                  ? 'positive'
+                  : 'muted'
+              }
+              onClick={() => setBreakdownMetric('mentions')}
+            />
+            <KpiCard
+              title="Citations"
+              tooltip="Times your brand's domain was cited as a source with a direct link in AI responses."
+              icon={Quote}
+              value={summary!.totalCitations}
+              sub={<DeltaBadge delta={summary!.citationsChange} />}
+              subVariant={
+                summary!.citationsChange !== null && summary!.citationsChange > 0
+                  ? 'positive'
+                  : 'muted'
+              }
+              onClick={() => router.push('/dashboard/citations')}
+            />
+            <KpiCard
+              title="Positive Sentiment"
+              tooltip="Percentage of AI responses that described your brand in a positive context."
+              icon={AlertCircle}
+              value={`${summary!.positiveSentimentPct}%`}
+              sub={<DeltaBadge delta={summary!.sentimentChange} suffix=" pts" />}
+              subVariant={
+                summary!.sentimentChange !== null && summary!.sentimentChange > 0
+                  ? 'positive'
+                  : 'muted'
+              }
+            />
+          </div>
+
+          {/* Competitor Comparison */}
+          {competitorData && (
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-5">
+              <Card className="lg:col-span-3">
+                <CardHeader className="pb-2">
+                  <CardTitle className="flex items-center gap-2 text-sm font-medium">
+                    <Users className="h-4 w-4" />
+                    AI Visibility — Brand vs Competitors
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <CompetitorChart
+                    providerRows={competitorData.providerRows}
+                    brands={competitorData.brands}
+                  />
+            </CardContent>
+              </Card>
+
+              <Card className="lg:col-span-2">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm font-medium">Leaderboard</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <CompetitorLeaderboard data={competitorData.brands} />
+                </CardContent>
+      </Card>
+            </div>
+          )}
+
+          {/* Share of Voice */}
+          {sovData && (
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardTitle className="flex items-center gap-2 text-sm font-medium">
+                    <PieChart className="h-4 w-4" />
+                    Share of Voice by Platform
+                  </CardTitle>
+                  {sovData.overallSovChange !== null && sovData.overallSovChange !== 0 && (
+                    <DeltaBadge delta={sovData.overallSovChange} suffix=" pts" />
+                  )}
+                </CardHeader>
+                <CardContent>
+                  <ShareOfVoicePlatformChart
+                    data={sovData.byPlatform}
+                    overallSov={sovData.overallSov}
+                  />
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader className="pb-2">
+                  <CardTitle className="flex items-center gap-2 text-sm font-medium">
+                    <TrendingUp className="h-4 w-4" />
+                    Share of Voice Trend
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <ShareOfVoiceTrendChart data={sovData.trend} />
+                </CardContent>
+              </Card>
+            </div>
+          )}
+
+          {/* Prompt Results by Topic */}
+          <PromptResultsGrouped
+            results={results}
+            loadedRowCount={results.length}
+            totalRowCount={totalResults}
+            onViewResult={(r) => router.push(`/dashboard/insights/${r.id}`)}
+            onRefreshPrompt={handleRefreshPrompt}
+          />
+        </>
+      )}
+
+      {/* Single Prompt Runner */}
+      <RunSinglePromptDialog
+        brandId={brand.id}
+        open={showSinglePrompt}
+        onClose={() => setShowSinglePrompt(false)}
+        onJobStarted={handleJobStarted}
+      />
+
+      {/* Metric Breakdown Drilldown */}
+      <MetricBreakdownSheet
+        brandId={brand.id}
+        metric={breakdownMetric}
+        onOpenChange={(open) => {
+          if (!open) setBreakdownMetric(null);
+        }}
+        filters={(() => {
+          const { dateFrom, dateTo } = getDateRange(filters.datePreset, {
+            from: filters.dateFrom,
+            to: filters.dateTo,
+          });
+          return {
+            dateFrom,
+            dateTo,
+            region: filters.region || undefined,
+            model: filters.model || undefined,
+            topicId: filters.topic || undefined,
+          };
+        })()}
+      />
+    </div>
+  );
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function formatTimeAgo(date: Date): string {
+  const diff = Date.now() - date.getTime();
+  const minutes = Math.floor(diff / 60_000);
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
