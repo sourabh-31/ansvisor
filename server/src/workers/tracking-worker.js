@@ -122,8 +122,12 @@ export async function processTrackingJob({ brandId, promptId, promptIds, job }) 
     }
   }
 
+  const webhookUrl = process.env.CLORO_WEBHOOK_URL;
+
   if (scraperTasks.length > 0) {
-    console.log(`[tracking] Submitting ${scraperTasks.length} scraper tasks to Cloro...`);
+    console.log(
+      `[tracking] Submitting ${scraperTasks.length} scraper tasks to Cloro (mode=${webhookUrl ? 'webhook' : 'polling'})...`,
+    );
 
     if (job) {
       job.progress({
@@ -138,7 +142,7 @@ export async function processTrackingJob({ brandId, promptId, promptIds, job }) 
     // Submit all tasks concurrently
     const submissions = await Promise.allSettled(
       scraperTasks.map((t) =>
-        submitScraperTask(t.prompt.text, t.scraperId, t.region)
+        submitScraperTask(t.prompt.text, t.scraperId, t.region, { webhookUrl })
           .then((res) => ({ ...res, meta: t }))
       ),
     );
@@ -158,56 +162,97 @@ export async function processTrackingJob({ brandId, promptId, promptIds, job }) 
       }
     }
 
-    console.log(`[tracking] ${submitted.length}/${scraperTasks.length} tasks submitted, polling for results...`);
+    if (webhookUrl) {
+      // Webhook mode: persist (taskId → prompt) mapping; the /cloro/callback
+      // endpoint will pick up results asynchronously when Cloro pushes them.
+      if (submitted.length > 0) {
+        const pendingRows = submitted.map(({ taskId, scraperId, meta }) => ({
+          task_id: taskId,
+          prompt_id: meta.prompt.id,
+          brand_id: brandId,
+          scraper_id: scraperId,
+          region: meta.region,
+        }));
 
-    // Poll + parse + insert each task independently (all in parallel)
-    await Promise.allSettled(
-      submitted.map(async ({ taskId, scraperId, meta }) => {
-        try {
-          console.log(`[tracking] Polling task=${taskId} scraper=${scraperId}...`);
-          const aiResponse = await pollScraperResult(taskId, scraperId);
-          console.log(`[tracking] Task=${taskId} scraper=${scraperId} completed, inserting result...`);
+        const { error: pendingErr } = await supabaseAdmin
+          .from('cloro_pending_tasks')
+          .insert(pendingRows);
 
-          const mentionCount = countBrandMentions(aiResponse.text, brandInfo);
-          const sentimentResult = mentionCount > 0
-            ? await analyzeSentimentAI(aiResponse.text, brandInfo.brandName)
-            : { sentiment: 'neutral', confidence: 0, reason: 'Brand not mentioned' };
-          const metrics = parseResponse(aiResponse, brandInfo, sentimentResult.sentiment, competitors);
-
-          await insertResult({
-            prompt_id: meta.prompt.id,
-            brand_id: brandId,
-            platform: meta.scraperId,
-            response: aiResponse.text,
-            citations: aiResponse.citations,
-            mention_count: metrics.mentionCount,
-            citation_count: metrics.citationCount,
-            sentiment: metrics.sentiment,
-            visibility_score: metrics.visibilityScore,
-            model_used: aiResponse.model,
-            region: meta.region,
-            competitor_mentions: metrics.competitorMentions,
-          });
-
-          console.log(`[tracking] Task=${taskId} scraper=${scraperId} result saved.`);
-        } catch (err) {
+        if (pendingErr) {
           console.error(
-            `[tracking] Task=${taskId} scraper=${scraperId} failed: ${err.message}`,
+            '[tracking] Failed to record pending Cloro tasks — webhook results will be dropped:',
+            pendingErr.message,
+          );
+        } else {
+          console.log(
+            `[tracking] ${submitted.length} pending tasks recorded. Webhook will deliver results.`,
           );
         }
+      }
 
-        completedTasks++;
-        if (job) {
-          job.progress({
-            current: completedTasks,
-            total: totalTasks,
-            promptText: meta.prompt.text.slice(0, 80),
-            model: scraperId,
-            platform: 'cloro',
-          });
-        }
-      }),
-    );
+      // Mark these as "completed" for progress purposes (job is done submitting).
+      completedTasks += submitted.length;
+      if (job && submitted.length > 0) {
+        job.progress({
+          current: completedTasks,
+          total: totalTasks,
+          promptText: 'All platform tasks queued — results streaming via webhook',
+          model: null,
+          platform: 'cloro',
+        });
+      }
+    } else {
+      console.log(`[tracking] ${submitted.length}/${scraperTasks.length} tasks submitted, polling for results...`);
+
+      // Polling fallback: wait for each task inline (legacy behavior)
+      await Promise.allSettled(
+        submitted.map(async ({ taskId, scraperId, meta }) => {
+          try {
+            console.log(`[tracking] Polling task=${taskId} scraper=${scraperId}...`);
+            const aiResponse = await pollScraperResult(taskId, scraperId);
+            console.log(`[tracking] Task=${taskId} scraper=${scraperId} completed, inserting result...`);
+
+            const mentionCount = countBrandMentions(aiResponse.text, brandInfo);
+            const sentimentResult = mentionCount > 0
+              ? await analyzeSentimentAI(aiResponse.text, brandInfo.brandName)
+              : { sentiment: 'neutral', confidence: 0, reason: 'Brand not mentioned' };
+            const metrics = parseResponse(aiResponse, brandInfo, sentimentResult.sentiment, competitors);
+
+            await insertResult({
+              prompt_id: meta.prompt.id,
+              brand_id: brandId,
+              platform: meta.scraperId,
+              response: aiResponse.text,
+              citations: aiResponse.citations,
+              mention_count: metrics.mentionCount,
+              citation_count: metrics.citationCount,
+              sentiment: metrics.sentiment,
+              visibility_score: metrics.visibilityScore,
+              model_used: aiResponse.model,
+              region: meta.region,
+              competitor_mentions: metrics.competitorMentions,
+            });
+
+            console.log(`[tracking] Task=${taskId} scraper=${scraperId} result saved.`);
+          } catch (err) {
+            console.error(
+              `[tracking] Task=${taskId} scraper=${scraperId} failed: ${err.message}`,
+            );
+          }
+
+          completedTasks++;
+          if (job) {
+            job.progress({
+              current: completedTasks,
+              total: totalTasks,
+              promptText: meta.prompt.text.slice(0, 80),
+              model: scraperId,
+              platform: 'cloro',
+            });
+          }
+        }),
+      );
+    }
   }
 
   // 7. Phase 2: Run AI model tasks concurrently

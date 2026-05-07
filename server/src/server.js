@@ -13,6 +13,8 @@ import routes from './routes/index.js';
 import trafficRoutes from './routes/traffic.js';
 import { createJob, cleanupStaleJobs, cleanupOldJobs } from './lib/job-manager.js';
 import { runTrackingJob } from './lib/job-runner.js';
+import { parseScraperResponse } from './lib/cloro-scraper.js';
+import { handleScraperResult } from './lib/cloro-result-handler.js';
 import supabaseAdmin from './config/supabase.js';
 import { getPlan, hasFeature, isCloud } from './config/plans.js';
 
@@ -178,6 +180,118 @@ app.post('/api/internal/trigger-tracking', async (req, res) => {
   } catch (err) {
     console.error('[internal] trigger-tracking error:', err.message);
     return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// --- Cloro webhook callback (public, no auth — security via task_id entropy + DB lookup) ---
+app.post('/cloro/callback', async (req, res) => {
+  // Always ack quickly so Cloro doesn't retry on slow processing
+  res.status(200).send();
+
+  try {
+    const { task, response } = req.body || {};
+    const taskId = task?.id;
+    const status = task?.status;
+
+    if (!taskId) {
+      console.warn('[cloro/callback] Missing task.id in payload');
+      return;
+    }
+
+    const { data: pending } = await supabaseAdmin
+      .from('cloro_pending_tasks')
+      .select('*')
+      .eq('task_id', taskId)
+      .maybeSingle();
+
+    if (!pending) {
+      console.log(`[cloro/callback] No pending task for ${taskId} (already processed?)`);
+      return;
+    }
+
+    if (status === 'FAILED') {
+      console.error(`[cloro/callback] Task ${taskId} (${pending.scraper_id}) FAILED`);
+      await supabaseAdmin
+        .from('cloro_pending_tasks')
+        .delete()
+        .eq('task_id', taskId);
+      return;
+    }
+
+    if (status !== 'COMPLETED') {
+      console.log(`[cloro/callback] Task ${taskId} status=${status}, ignoring`);
+      return;
+    }
+
+    if (!response) {
+      console.error(`[cloro/callback] Task ${taskId} COMPLETED but missing response`);
+      await supabaseAdmin
+        .from('cloro_pending_tasks')
+        .delete()
+        .eq('task_id', taskId);
+      return;
+    }
+
+    // Fetch context for result handler
+    const [
+      { data: brand },
+      { data: domains },
+      { data: competitorRows },
+    ] = await Promise.all([
+      supabaseAdmin
+        .from('brands')
+        .select('id, name')
+        .eq('id', pending.brand_id)
+        .single(),
+      supabaseAdmin
+        .from('brand_domains')
+        .select('domain')
+        .eq('brand_id', pending.brand_id),
+      supabaseAdmin
+        .from('competitors')
+        .select('id, name, domain')
+        .eq('brand_id', pending.brand_id),
+    ]);
+
+    if (!brand) {
+      console.error(`[cloro/callback] Brand ${pending.brand_id} for task ${taskId} not found — dropping`);
+      await supabaseAdmin
+        .from('cloro_pending_tasks')
+        .delete()
+        .eq('task_id', taskId);
+      return;
+    }
+
+    const brandInfo = {
+      brandName: brand.name,
+      domains: (domains || []).map((d) => d.domain),
+    };
+    const competitors = (competitorRows || []).map((c) => ({
+      id: c.id,
+      name: c.name,
+      domain: c.domain || '',
+    }));
+
+    const aiResponse = parseScraperResponse(response, pending.scraper_id);
+
+    await handleScraperResult({
+      aiResponse,
+      scraperId: pending.scraper_id,
+      promptId: pending.prompt_id,
+      brandId: pending.brand_id,
+      region: pending.region,
+      brandInfo,
+      competitors,
+    });
+
+    await supabaseAdmin
+      .from('cloro_pending_tasks')
+      .delete()
+      .eq('task_id', taskId);
+
+    console.log(`[cloro/callback] Task ${taskId} (${pending.scraper_id}) processed and inserted`);
+  } catch (err) {
+    console.error('[cloro/callback] Error processing webhook:', err?.message || err);
   }
 });
 

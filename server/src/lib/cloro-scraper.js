@@ -65,7 +65,7 @@ function buildRequestBody(promptText, scraperId, region) {
   };
 }
 
-function parseResponse(result, scraperId) {
+export function parseScraperResponse(result, scraperId) {
   if (scraperId === 'google-aio') {
     const aio = result.aioverview;
     if (!aio) {
@@ -113,9 +113,10 @@ function parseResponse(result, scraperId) {
  * @param {string} promptText
  * @param {string} scraperId
  * @param {string} [region]
+ * @param {{ webhookUrl?: string }} [opts]
  * @returns {Promise<{ taskId: string, scraperId: string }>}
  */
-export async function submitScraperTask(promptText, scraperId, region) {
+export async function submitScraperTask(promptText, scraperId, region, opts = {}) {
   const taskType = SCRAPER_TASK_TYPES[scraperId];
   if (!taskType) throw new Error(`Unknown scraper: ${scraperId}`);
 
@@ -125,13 +126,18 @@ export async function submitScraperTask(promptText, scraperId, region) {
     `[cloro] Submitting ${taskType} task | scraper=${scraperId} region=${region || 'US'} prompt="${promptText.slice(0, 60)}..."`,
   );
 
+  const requestBody = { taskType, payload };
+  if (opts.webhookUrl) {
+    requestBody.webhook = { url: opts.webhookUrl };
+  }
+
   const res = await fetch(`${CLORO_API}/v1/async/task`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${getApiKey()}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ taskType, payload }),
+    body: JSON.stringify(requestBody),
   });
 
   if (!res.ok) {
@@ -209,7 +215,7 @@ export async function pollScraperResult(taskId, scraperId, opts = {}) {
         throw new Error(
           `Cloro task ${taskId} completed but returned no response`,
         );
-      return parseResponse(result, scraperId);
+      return parseScraperResponse(result, scraperId);
     }
 
     if (status === 'FAILED') {
