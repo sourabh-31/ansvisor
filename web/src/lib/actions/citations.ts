@@ -111,6 +111,35 @@ function resolveDateRange(
 
 // ─── Main action ──────────────────────────────────────────────────────────────
 
+/**
+ * Apply the platform/model filter to `prompt_results.model_used`.
+ *
+ * Supports both a single slug (`gpt-5-5`) and a comma-joined family
+ * (`gpt-5-3-mini,gpt-5-5`) so the UI can filter an entire provider family
+ * from one dropdown option.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function applyModelFilter<T extends { eq: any; in: any }>(
+  query: T,
+  models: string[] | undefined,
+): T {
+  if (!models || models.length === 0) return query;
+
+  const list = Array.from(
+    new Set(
+      models.flatMap((model) =>
+        model
+          .split(',')
+          .map((slug) => slug.trim())
+          .filter(Boolean),
+      ),
+    ),
+  );
+
+  if (list.length <= 1) return query.eq('model_used', list[0] ?? models[0]);
+  return query.in('model_used', list);
+}
+
 export async function getCitationsOverview(
   brandId: string,
   filters: CitationsFilters,
@@ -149,7 +178,7 @@ export async function getCitationsOverview(
   if (from) query = query.gte('created_at', from);
   if (to) query = query.lte('created_at', to);
   if (filters.platforms && filters.platforms.length > 0) {
-    query = query.in('platform', filters.platforms);
+    query = applyModelFilter(query, filters.platforms);
   }
   if (filters.regions && filters.regions.length > 0) {
     query = query.in('region', filters.regions);

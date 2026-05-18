@@ -72,6 +72,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
 import {
   AIProviderAvatar,
+  getAIProviderDisplayName,
   resolveAIProvider,
   type AIProviderKey,
 } from '@/components/ai-provider-avatar';
@@ -117,6 +118,25 @@ const CATEGORY_BADGE_CLASSES: Record<SourceCategory, string> = {
 };
 
 // AI platform / model friendly names — kept in sync with the insights page.
+const PLATFORM_LABELS: Record<string, string> = {
+  chatgpt: 'ChatGPT',
+  gemini: 'Gemini',
+  perplexity: 'Perplexity',
+  claude: 'Claude',
+  grok: 'Grok',
+  copilot: 'Copilot',
+  'meta-ai': 'Meta AI',
+  'google-ai-overviews': 'Google AI',
+  'google-ai-mode': 'Google AI Mode',
+  'chatgpt-web': 'ChatGPT',
+  'google-aio': 'Google AI Overview',
+  'google-aimode': 'Google AI Mode',
+  'copilot-web': 'Microsoft Copilot',
+  'grok-web': 'Grok',
+  'perplexity-web': 'Perplexity',
+  'gemini-web': 'Google Gemini',
+};
+
 const MODEL_DISPLAY_NAME: Record<string, string> = {
   'gpt-4o': 'GPT-4o',
   'gpt-4o-mini': 'GPT-4o Mini',
@@ -140,8 +160,20 @@ const MODEL_DISPLAY_NAME: Record<string, string> = {
   'gemini-web': 'Gemini',
 };
 
-function getModelLabel(model: string): string {
-  return MODEL_DISPLAY_NAME[model] ?? model;
+function getPlatformDisplayLabel(slug: string): string {
+  return (
+    MODEL_DISPLAY_NAME[slug] ??
+    PLATFORM_LABELS[slug] ??
+    getAIProviderDisplayName(resolveAIProvider(slug))
+  );
+}
+
+function getGroupedPlatformLabel(value: string): string {
+  const firstSlug = value
+    .split(',')
+    .map((slug) => slug.trim())
+    .find(Boolean);
+  return firstSlug ? getPlatformDisplayLabel(firstSlug) : value;
 }
 
 // ─── Filter types ─────────────────────────────────────────────────────────────
@@ -157,6 +189,11 @@ interface UIFilters {
   competitorOnly: boolean;
 }
 
+interface PlatformOption {
+  value: string;
+  label: string;
+}
+
 const DEFAULT_FILTERS: UIFilters = {
   datePreset: 'all',
   dateFrom: '',
@@ -167,6 +204,35 @@ const DEFAULT_FILTERS: UIFilters = {
   excludeOwnDomain: false,
   competitorOnly: false,
 };
+
+function buildPlatformOptions(
+  rows: CitationsOverview['rows'],
+): PlatformOption[] {
+  const slugToLabel = new Map<string, string>();
+  for (const row of rows) {
+    for (const slug of row.models) {
+      if (!slug || slugToLabel.has(slug)) continue;
+      slugToLabel.set(slug, getPlatformDisplayLabel(slug));
+    }
+  }
+
+  const familyToSlugs = new Map<string, string[]>();
+  for (const [slug, label] of slugToLabel) {
+    const slugs = familyToSlugs.get(label) ?? [];
+    slugs.push(slug);
+    familyToSlugs.set(label, slugs);
+  }
+
+  return Array.from(familyToSlugs.entries())
+    .map(([label, slugs]) => ({
+      label,
+      value: slugs.sort().join(','),
+    }))
+    .sort(
+      (a, b) =>
+        a.label.localeCompare(b.label) || a.value.localeCompare(b.value),
+    );
+}
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
@@ -373,7 +439,7 @@ function FilterBar({
   filters: UIFilters;
   onChange: (patch: Partial<UIFilters>) => void;
   topics: Topic[];
-  platforms: string[];
+  platforms: PlatformOption[];
   regions: string[];
 }) {
   return (
@@ -474,16 +540,17 @@ function FilterBar({
             <SelectValue placeholder="All Platforms">
               {(value) =>
                 value && value !== '__all__'
-                  ? getModelLabel(value)
+                  ? platforms.find((platform) => platform.value === value)
+                      ?.label ?? getGroupedPlatformLabel(value)
                   : 'All Platforms'
               }
             </SelectValue>
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="__all__">All Platforms</SelectItem>
-            {platforms.map((p) => (
-              <SelectItem key={p} value={p}>
-                {getModelLabel(p)}
+            {platforms.map((platform) => (
+              <SelectItem key={platform.value} value={platform.value}>
+                {platform.label}
               </SelectItem>
             ))}
           </SelectContent>
@@ -739,7 +806,9 @@ export default function CitationsPage() {
   const [data, setData] = useState<CitationsOverview | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [topics, setTopics] = useState<Topic[]>([]);
-  const [availablePlatforms, setAvailablePlatforms] = useState<string[]>([]);
+  const [availablePlatforms, setAvailablePlatforms] = useState<PlatformOption[]>(
+    [],
+  );
   const [availableRegions, setAvailableRegions] = useState<string[]>([]);
 
   const activeBrandId = brand?.id ?? null;
@@ -774,14 +843,19 @@ export default function CitationsPage() {
       setData(overview);
 
       // Surface filter options from the observed models/regions.
-      const platforms = new Set<string>();
+      const platformOptions = buildPlatformOptions(overview.rows);
       const regions = new Set<string>();
-      for (const row of overview.rows) {
-        for (const m of row.models) platforms.add(m);
-      }
       setAvailablePlatforms((prev) =>
-        Array.from(new Set([...prev, ...platforms])).sort((a, b) =>
-          a.localeCompare(b),
+        Array.from(
+          new Map(
+            [...prev, ...platformOptions].map((platform) => [
+              platform.value,
+              platform,
+            ]),
+          ).values(),
+        ).sort(
+          (a, b) =>
+            a.label.localeCompare(b.label) || a.value.localeCompare(b.value),
         ),
       );
       if (regions.size > 0) {
