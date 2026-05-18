@@ -15,12 +15,8 @@ import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Separator } from '@/components/ui/separator';
 import { BrandSwitcher } from '@/components/layout/brand-switcher';
-import {
-  Crown,
-  Lock,
-  PanelLeftClose,
-  PanelLeftOpen,
-} from 'lucide-react';
+import { UserProfileNavItem } from '@/components/layout/user-profile-nav-item';
+import { Crown, Lock, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 
 export function Sidebar() {
   const pathname = usePathname();
@@ -31,6 +27,7 @@ export function Sidebar() {
   const { resolvedTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
+
   const logoSrc =
     mounted && resolvedTheme === 'dark' ? '/logo_dark.svg' : '/logo_light.svg';
 
@@ -55,11 +52,18 @@ export function Sidebar() {
         isCollapsed ? 'w-16' : 'w-60',
       )}
     >
-      {/* Logo */}
-      <div className="flex h-16 items-center border-b px-3">
+      <div
+        className={cn(
+          'flex h-16 items-center border-b px-3',
+          isCollapsed && 'justify-center px-0',
+        )}
+      >
         <Link
           href="/dashboard"
-          className="flex items-center gap-2 overflow-hidden"
+          className={cn(
+            'flex items-center gap-2 overflow-hidden',
+            !isCollapsed && 'w-full',
+          )}
         >
           <Image
             src={logoSrc}
@@ -75,14 +79,10 @@ export function Sidebar() {
         </Link>
       </div>
 
-      {/* Brand Switcher */}
-      <div
-        className={cn('border-b px-2 py-2', isCollapsed && 'px-1')}
-      >
+      <div className={cn('border-b px-2 py-2', isCollapsed && 'px-1')}>
         <BrandSwitcher collapsed={isCollapsed} />
       </div>
 
-      {/* Nav */}
       <ScrollArea className="flex-1 px-2 py-3">
         {dashboardNav.map((group, i) => (
           <div key={i} className="mb-4">
@@ -113,7 +113,7 @@ export function Sidebar() {
                     <span
                       key={item.href}
                       className={cn(
-                        'flex items-center gap-3 rounded-md px-2 py-2 text-sm font-medium text-muted-foreground/50 cursor-not-allowed',
+                        'flex cursor-not-allowed items-center gap-3 rounded-md px-2 py-2 text-sm font-medium text-muted-foreground/50',
                         isCollapsed && 'justify-center',
                       )}
                       title={
@@ -128,7 +128,7 @@ export function Sidebar() {
                           <span className="flex-1 truncate">{label}</span>
                           <Badge
                             variant="outline"
-                            className="ml-auto h-5 gap-0.5 px-1.5 text-[10px] font-normal shrink-0"
+                            className="ml-auto h-5 shrink-0 gap-0.5 px-1.5 text-[10px] font-normal"
                           >
                             <Crown className="h-2.5 w-2.5" />
                             {requiredPlanFor(item.requiredFeature!)}
@@ -167,12 +167,15 @@ export function Sidebar() {
         ))}
       </ScrollArea>
 
-      {/* Collapse toggle */}
+      <div className="border-t p-2">
+        <UserProfileNavItem collapsed={isCollapsed} />
+      </div>
+
       <div className="border-t p-2">
         <Button
           variant="ghost"
           size="icon"
-          className="w-full"
+          className="mt-1 w-full"
           onClick={toggleCollapse}
         >
           {isCollapsed ? (
