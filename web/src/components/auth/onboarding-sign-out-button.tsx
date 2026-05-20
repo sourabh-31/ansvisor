@@ -18,7 +18,7 @@ export function OnboardingSignOutButton() {
 
     if (error) {
       setIsSigningOut(false);
-      toast.error('Failed to sign out. Please try again.');
+      toast.error(tAuth('errors.signOutError'));
       return;
     }
 
