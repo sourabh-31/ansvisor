@@ -34,11 +34,11 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { 
-  Table, 
-  TableBody, 
-  TableCell, 
-  TableRow, 
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableRow,
 } from '@/components/ui/table';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
@@ -221,9 +221,7 @@ function VisibilityBar({ score, max = 100 }: { score: number; max?: number }) {
           style={{ width: `${pct}%` }}
         />
       </div>
-      <span className="text-sm font-medium tabular-nums">
-        {Math.round(score)}
-      </span>
+      <span className="text-sm font-medium tabular-nums">{Math.round(score)}</span>
     </div>
   );
 }
@@ -315,7 +313,7 @@ interface PromptGroup {
   totalCitations: number;
 }
 
-function groupResultsByPlatform( items: PromptResultWithText[]): PlatformGroup[] {
+function groupResultsByPlatform(items: PromptResultWithText[]): PlatformGroup[] {
   const map = new Map<string, PromptResultWithText[]>();
   for (const r of items) {
     const key = `${r.platform}|${r.modelUsed ?? ''}`;
@@ -542,6 +540,7 @@ function KpiCard({
   );
 }
 
+
 // ─── Run Single Prompt Dialog ─────────────────────────────────────────────────
 
 function RunSinglePromptDialog({
@@ -730,15 +729,13 @@ function FilterBar({
           </label>
           <Select
             value={filters.topic || null}
-            onValueChange={(v) =>
-              set({ topic: !v || v === '__all__' ? '' : v })
-            }
+            onValueChange={(v) => set({ topic: !v || v === '__all__' ? '' : v })}
           >
             <SelectTrigger className="h-8 w-40 text-xs">
               <SelectValue placeholder="All Topics">
                 {(value) =>
                   value && value !== '__all__'
-                    ? (availableTopics.find((t) => t.id === value)?.name ?? 'All Topics')
+                    ? availableTopics.find((t) => t.id === value)?.name ?? 'All Topics'
                     : 'All Topics'
                 }
               </SelectValue>
@@ -839,16 +836,16 @@ function InsightsSkeleton() {
               <Skeleton className="h-4 w-24" />
               <Skeleton className="h-8 w-16" />
               <Skeleton className="h-3 w-32" />
-            </CardContent>
-          </Card>
+          </CardContent>
+        </Card>
         ))}
       </div>
-      <Card>
+    <Card>
         <CardContent className="pt-6">
           <Skeleton className="h-48 w-full" />
-        </CardContent>
-      </Card>
-    </div>
+      </CardContent>
+    </Card>
+  </div>
   );
 }
 
@@ -1129,7 +1126,7 @@ function PlatformSubGroup({
                             size="icon"
                             className="h-6 w-6"
                             title="View detail"
-                            onClick={(e) => { e.stopPropagation();onViewResult(r); }}
+                            onClick={(e) => { e.stopPropagation(); onViewResult(r); }}
                           >
                             <Eye className="h-3 w-3" />
                           </Button>
@@ -1141,7 +1138,7 @@ function PlatformSubGroup({
               </div>
               {hasMoreHistory && (
                 <p className="text-[10px] text-muted-foreground mt-1">
-                  Showing latest {HISTORY_LIMIT} of {group.results.length - 1}{' '} previous runs.
+                  Showing latest {HISTORY_LIMIT} of {group.results.length - 1} previous runs.
                 </p>
               )}
             </div>
@@ -1182,7 +1179,7 @@ function PromptSubGroup({
         }}
         className="flex w-full items-center gap-3 px-4 py-2.5 text-left hover:bg-muted/50 transition-colors cursor-pointer select-none"
       >
-        <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform', !expanded && '-rotate-90')}/>
+        <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform', !expanded && '-rotate-90')} />
         <div className="flex-1 min-w-0">
           <p className="text-sm line-clamp-1">{group.promptText}</p>
           <span className="text-[11px] text-muted-foreground">
@@ -1487,7 +1484,8 @@ export default function InsightsPage() {
         );
         setAvailableModels((prev) =>
           [...new Set([...prev, ...models])].sort((a, b) => 
-            a.localeCompare(b)),
+            a.localeCompare(b)
+          ),
         );
       } catch (err) {
         const message = err instanceof Error ? err.message : '';
@@ -1933,10 +1931,7 @@ export default function InsightsPage() {
                     Share of Voice by Platform
                   </CardTitle>
                   {sovData.overallSovChange !== null && sovData.overallSovChange !== 0 && (
-                      <DeltaBadge
-                        delta={sovData.overallSovChange}
-                        suffix=" pts"
-                      />
+                      <DeltaBadge delta={sovData.overallSovChange} suffix=" pts" />
                     )}
                 </CardHeader>
                 <CardContent>
